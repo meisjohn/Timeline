@@ -1,0 +1,23 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# --- Data & Outputs ---
+# Ignore the generated images
+outputs/
+
+# Ignore Excel temporary/lock files (e.g., ~$events.xlsx)
+~$*.xlsx
+~$*.xls
+
+# --- Environment/Config ---
+# If you eventually use a .env file for secrets
+.env
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db
