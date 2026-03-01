@@ -3,7 +3,4 @@ pandas
 openpyxl
 
 # Visualization
-plotly
-
-# Image export engine (Required for fig.write_image)
-kaleido==0.2.1
+bokeh

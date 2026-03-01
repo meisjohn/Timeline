@@ -1,11 +1,15 @@
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
+from bokeh.plotting import figure
+from bokeh.io import save
+from bokeh.models import ColumnDataSource, Span, Label, BoxAnnotation, Range1d, DatetimeTickFormatter, Legend, LegendItem, HoverTool
 from datetime import datetime, timedelta
 import os, sys, subprocess
+from io import BytesIO
 
 # 1. Setup & Args
-input_arg = sys.argv if len(sys.argv) > 1 else "data/events.xlsx"
+input_arg = "data/events.xlsx"
+for arg in sys.argv[1:]:
+        input_arg = arg
 output_dir = "outputs"
 os.makedirs(output_dir, exist_ok=True)
 
@@ -30,10 +34,23 @@ except Exception as e:
 
 df = df.sort_values(by='End', ascending=True)
 summary_df = df.copy()
-summary_df['Event Name'] = "ALL EVENTS" 
+summary_df['Y_Axis_Label'] = "ALL EVENTS"
+df['Y_Axis_Label'] = df['Event Name']
 
 plot_df = pd.concat([summary_df, df], ignore_index=True)
-event_order = df['Event Name'].unique().tolist()[::-1] + ["ALL EVENTS"]
+event_order = ["ALL EVENTS"] + df['Event Name'].unique().tolist()[::-1]
+
+# Pre-calculate Bokeh Styles (Colors & Borders)
+unique_phases = plot_df['Task/Phase'].unique()
+phase_map = {p: NON_RED_PALETTE[i % len(NON_RED_PALETTE)] for i, p in enumerate(unique_phases)}
+plot_df['base_color'] = plot_df['Task/Phase'].map(phase_map)
+
+def get_style(row):
+    s = STATUS_MAP.get(row['Status'], STATUS_MAP["On Track"])
+    # If status has no fill, use the Task/Phase color
+    fc = s['fill'] if s['fill'] else row['base_color']
+    return pd.Series([s['border'], fc, s['width']])
+plot_df[['b_line', 'b_fill', 'b_width']] = plot_df.apply(get_style, axis=1)
 
 # 3. Visualization Constants
 today = datetime.now()
@@ -49,91 +66,98 @@ views = [
 ]
 
 for view in views:
-    fig = px.timeline(
-        plot_df, x_start="Start", x_end="End", y="Event Name", 
-        color="Task/Phase",
-        color_discrete_sequence=NON_RED_PALETTE,
-        category_orders={"Event Name": event_order}
+    # Filter Data for Rolling Window
+    if view["name"] == "Rolling_Window":
+        w_start, w_end = view["range"]
+        # Check for overlap: Task Start < Window End AND Task End > Window Start
+        mask = (plot_df['Start'] < w_end) & (plot_df['End'] > w_start)
+        valid_events = plot_df.loc[mask, 'Event Name'].unique()
+        view_df = plot_df[plot_df['Event Name'].isin(valid_events)].copy()
+        view_event_order = [e for e in event_order if e in valid_events or e == "ALL EVENTS"]
+    else:
+        view_df = plot_df
+        view_event_order = event_order
+
+    # Initialize Bokeh Figure
+    # Note: We reverse event_order for y_range to match Plotly's top-to-bottom layout
+    p = figure(
+        y_range=view_event_order[::-1], 
+        x_range=Range1d(view["range"][0], view["range"][1]),
+        x_axis_type="datetime",
+        height=max(400, (len(view_event_order) * 45) + 200),
+        width=1600,
+        title=view["name"].replace("_", " "),
+        toolbar_location="above",
+        tools="pan,wheel_zoom,box_zoom,reset,save"
     )
+    p.title.align = "center"
+    p.title.text_font_size = "16pt"
 
-    # 4. Apply Status Borders
-    for trace in fig.data:
-        trace_tasks = plot_df[plot_df['Task/Phase'] == trace.name]
-        b_colors, b_widths = [], []
-        f_colors = list(trace.marker.color) if isinstance(trace.marker.color, (list, tuple)) else [trace.marker.color] * len(trace_tasks)
-
-        for i, status in enumerate(trace_tasks['Status']):
-            s_cfg = STATUS_MAP.get(status, STATUS_MAP["On Track"])
-            b_colors.append(s_cfg['border'])
-            b_widths.append(s_cfg['width'])
-            if s_cfg['fill']: f_colors[i] = s_cfg['fill']
-
-        trace.marker.line.color = b_colors
-        trace.marker.line.width = b_widths
-        trace.marker.color = f_colors
-
-    # 5. Legend
-    for status, style in STATUS_MAP.items():
-        fig.add_trace(go.Bar(x=[None], y=[None], name=f"Status: {status}",
-                             marker=dict(color=style['fill'] if style['fill'] else 'rgba(0,0,0,0)', 
-                                         line=dict(color=style['border'], width=style['width'])),
-                             showlegend=True))
-
-    # 6. Banded Columns (Vertical Stripes)
+    # 4. Banded Columns (Vertical Stripes)
     stripe_start = data_min - timedelta(days=30)
     for i in range(0, 40): 
-        fig.add_vrect(
-            x0=stripe_start + timedelta(days=i*14), 
-            x1=stripe_start + timedelta(days=(i*14)+7),
-            fillcolor="#fbfbfb", layer="below", line_width=0
-        )
+        s = stripe_start + timedelta(days=i*14)
+        p.add_layout(BoxAnnotation(left=s, right=s+timedelta(days=7), fill_color="#e0e0e0", fill_alpha=1, level="image"))
 
-    # 7. Overlays & Separators
+    # 5. Overlays & Separators
     # Transparent box from far-left (relative to view) to Today
     box_left = view["range"][0] if view["range"] else data_min
-    fig.add_vrect(x0=box_left - timedelta(days=200), x1=today, 
-                  fillcolor="white", opacity=0.85, layer="above", line_width=0)
-    
-    # Thick separator below "ALL EVENTS"
-    fig.add_shape(type="line", x0=0, x1=1, xref="paper", y0=0.5, y1=0.5, 
-                  line=dict(color="black", width=4), layer="above")
+    p.add_layout(BoxAnnotation(left=box_left - timedelta(days=200), right=today, fill_color="white", fill_alpha=0.75, level="overlay"))
     
     # Today Marker
-    fig.add_shape(type="line", x0=today, x1=today, y0=0, y1=1, yref="paper",
-                  line=dict(color="#d63031", width=2), layer="above")
-    
-    fig.add_annotation(x=today, y=0.05, yref="paper", 
-                       text=f" TODAY ({today.strftime('%b %d')})", 
-                       showarrow=False, font=dict(color="#d63031", size=11, family="Arial Black"),
-                       bgcolor="white", xanchor="left")
+    p.add_layout(Span(location=today, dimension='height', line_color="#d63031", line_width=2, level="overlay"))
+    p.add_layout(Label(x=today, y=10, y_units='screen', text=f" TODAY ({today.strftime('%b %d')})", 
+                       text_color="#d63031", text_font_style="bold", background_fill_color="white"))
 
-    # 8. Layout & Banded Rows
-    fig.update_layout(
-        height=max(400, (len(event_order) * 45) + 200),
-        plot_bgcolor="white", paper_bgcolor="white",
-        margin=dict(l=180, r=40, t=100, b=120),
-        xaxis=dict(
-            showgrid=True, gridcolor="#eeeeee", 
-            tickformat="%b %d %Y", # Added Year
-            side="top",
-            mirror="allticks", ticks="outside",
-            range=view["range"] # Forces strict axis clipping
-        ),
-        yaxis=dict(
-            title="", autorange="reversed",
-            showgrid=True, gridcolor="#eeeeee",
-            zeroline=False
-        ),
-        legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5)
-    )
+    # Highlight "ALL EVENTS" Row Background
+    if "ALL EVENTS" in view_event_order:
+        p.hbar(y=["ALL EVENTS"], left=view["range"][0]-(view["range"][1]-view["range"][0]), right=view["range"][1]+(view["range"][1]-view["range"][0]), height=1, 
+               fill_color=None, line_color="#000000", line_width=2, level="underlay")
 
-    filename = os.path.join(output_dir, f"{view['name']}_{timestamp}.png")
-    fig.write_image(filename, width=1600, scale=3)
+    # 6. Main Timeline Bars
+    src = ColumnDataSource(view_df)
+    timeline_bars = p.hbar(y='Y_Axis_Label', left='Start', right='End', height=0.6, source=src,
+                           fill_color='b_fill', line_color='b_line', line_width='b_width')
 
-# 9. Open Folder
-print(f"Success! Charts saved to {output_dir}")
+    # 7. Legend (Status)
+    items = []
+    for status, style in STATUS_MAP.items():
+        # Create invisible dummy glyphs for the legend
+        dummy = p.hbar(y=[view_event_order[0]] if view_event_order else [], left=[today], right=[today], visible=False,
+                       fill_color=style['fill'] or "white", line_color=style['border'], line_width=style['width'])
+        items.append(LegendItem(label=f"Status: {status}", renderers=[dummy]))
+    p.add_layout(Legend(items=items, location="bottom_center", orientation="horizontal"), 'below')
+
+    # 8. Styling
+    p.xaxis.formatter = DatetimeTickFormatter(days="%b %d %Y", months="%b %d %Y")
+    p.xaxis.axis_label = ""
+    p.yaxis.axis_label = ""
+    p.ygrid.grid_line_color = None
+    p.outline_line_color = None
+
+    # Add Tooltips
+    p.add_tools(HoverTool(
+        renderers=[timeline_bars],
+        tooltips=[
+            ("Event", "@{Event Name}"),
+            ("Start", "@Start{%F}"),
+            ("End", "@End{%F}"),
+            ("Phase", "@{Task/Phase}"),
+            ("Status", "@Status")
+        ],
+        formatters={'@Start': 'datetime', '@End': 'datetime'}
+    ))
+
+    # Save Image & Optional PowerPoint
+    output_filename = os.path.join(output_dir, f"{view['name']}_{timestamp}.html")
+    save(p, filename=output_filename)
+
+output_path = output_dir
+
+# 9. Open File
+print(f"Success! Charts saved to {output_path}")
 def open_folder(path):
     if sys.platform == 'win32': os.startfile(os.path.abspath(path))
     elif sys.platform == 'darwin': subprocess.Popen(['open', path])
     else: subprocess.Popen(['xdg-open', path])
-open_folder(output_dir)
+open_folder(output_path)
