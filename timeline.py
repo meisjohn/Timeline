@@ -1,17 +1,42 @@
+"""
+Timeline Generator
+==================
+
+This script reads project event data from an Excel file and generates interactive
+timeline visualizations using the Bokeh library.
+
+Features:
+- Generates two views: A full timeline and a rolling window (past 30 days, future 90 days).
+- Color-coded bars based on status and phase.
+- Visual indicators for "Today".
+- HTML output with hover tooltips.
+
+Usage:
+    python timeline.py [path_to_excel_file]
+"""
 import pandas as pd
 from bokeh.plotting import figure
 from bokeh.io import save
 from bokeh.models import ColumnDataSource, Span, Label, BoxAnnotation, Range1d, DatetimeTickFormatter, Legend, LegendItem, HoverTool
 from datetime import datetime, timedelta
-import os, sys, subprocess
-from io import BytesIO
+import os
+import sys
+import subprocess
+import argparse
 
 # 1. Setup & Args
-input_arg = "data/events.xlsx"
-for arg in sys.argv[1:]:
-        input_arg = arg
+parser = argparse.ArgumentParser(description="Generate interactive HTML timelines from an Excel schedule.")
+parser.add_argument("input_file", nargs="?", default="data/events.xlsx", help="Path to the source Excel file (default: data/events.xlsx)")
+parser.add_argument("--past", type=int, default=30, help="Days in the past for the rolling window (default: 30)")
+parser.add_argument("--future", type=int, default=90, help="Days in the future for the rolling window (default: 90)")
+args = parser.parse_args()
+input_arg = args.input_file
+
 output_dir = "outputs"
 os.makedirs(output_dir, exist_ok=True)
+
+ROLLING_WINDOW_PREVIOUS_DAYS = args.past
+ROLLING_WINDOW_FUTURE_DAYS = args.future
 
 STATUS_MAP = {
     "Late": {"border": "#c0392b", "fill": "#e74c3c", "width": 4},
@@ -24,6 +49,10 @@ STATUS_MAP = {
 NON_RED_PALETTE = ["#1f77b4", "#2ca02c", "#ff7f0e", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
 
 # 2. Load and Prepare Data
+if not os.path.exists(input_arg):
+    print(f"Error: Input file '{input_arg}' not found.")
+    sys.exit(1)
+
 try:
     df = pd.read_excel(input_arg)
     df['Start'], df['End'] = pd.to_datetime(df['Start']), pd.to_datetime(df['End'])
@@ -46,6 +75,10 @@ phase_map = {p: NON_RED_PALETTE[i % len(NON_RED_PALETTE)] for i, p in enumerate(
 plot_df['base_color'] = plot_df['Task/Phase'].map(phase_map)
 
 def get_style(row):
+    """
+    Determines the visual style (border, fill, width) for a timeline bar
+    based on its Status and Task/Phase.
+    """
     s = STATUS_MAP.get(row['Status'], STATUS_MAP["On Track"])
     # If status has no fill, use the Task/Phase color
     fc = s['fill'] if s['fill'] else row['base_color']
@@ -62,7 +95,7 @@ data_max = plot_df['End'].max() + timedelta(days=5)
 
 views = [
     {"name": "Full_Timeline", "range": [data_min, data_max]}, # Forces tight bounds
-    {"name": "Rolling_Window", "range": [today - timedelta(days=30), today + timedelta(days=90)]}
+    {"name": "Rolling_Window", "range": [today - timedelta(days=ROLLING_WINDOW_PREVIOUS_DAYS), today + timedelta(days=ROLLING_WINDOW_FUTURE_DAYS)]}
 ]
 
 for view in views:
@@ -157,6 +190,10 @@ output_path = output_dir
 # 9. Open File
 print(f"Success! Charts saved to {output_path}")
 def open_folder(path):
+    """
+    Opens the output directory in the system's default file explorer.
+    Supports Windows, macOS, and Linux.
+    """
     if sys.platform == 'win32': os.startfile(os.path.abspath(path))
     elif sys.platform == 'darwin': subprocess.Popen(['open', path])
     else: subprocess.Popen(['xdg-open', path])
